@@ -18,6 +18,10 @@ using System.Text;
 //                                      future hard mode that randomizes it.
 // Pools and per-unit level/HP come from the game's dBASE tables (Globals\Gunits.dbf, GItem.dbf).
 //
+// It also stamps the scenario name with the generation time (date + hour:minute) and sets the
+// designer to "berkutx" — in the header (fixed-width, in place) and in CScenarioInfo (NAME/CREATOR
+// length-strings, spliced) — so freshly rolled arenas are distinguishable in the scenario/save list.
+//
 // .sg layout: header + blocks. A block = "WHAT"<size:4>".?AV<Class>@@\0" <fields> "ENDOBJECT\0".
 // A field is <ascii-tag><value>: length-string = tag + int32-LE length(incl null) + bytes; int =
 // tag + int32-LE; bool = tag + 1 byte; the 6-char id = tag + 8 + 6 bytes. Every patched value keeps
@@ -123,6 +127,23 @@ internal static class Program
             }
         }
 
+        // --- stamp the scenario name with the generation time + set the designer to berkutx ---
+        const string Designer = "berkutx";
+        string stamp = " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        // header copy (fixed-width slots): _Name @321/64, _Author @299/21 — drives the list display
+        string hdrName = Str(sg, 321, 64); int z = hdrName.IndexOf('\0'); if (z >= 0) hdrName = hdrName[..z];
+        PatchFixed(sg, 321, 64, hdrName + stamp);
+        PatchFixed(sg, 299, 21, Designer);
+        // CScenarioInfo copy (length-strings): re-locate the block after each splice shifts the tail
+        var (cs, ce) = ScenInfo(sg);
+        if (cs >= 0)
+        {
+            sg = ReplaceLenStr(sg, cs, ce, "NAME", (ReadLenStr(sg, cs, ce, "NAME") ?? hdrName) + stamp);
+            (cs, ce) = ScenInfo(sg);
+            sg = ReplaceLenStr(sg, cs, ce, "CREATOR", Designer);
+        }
+        Console.WriteLine($"[rng] name=\"{hdrName}{stamp}\" designer={Designer}");
+
         File.WriteAllBytes(outPath, sg);
         foreach (var ext in new[] { ".id0", ".id1", ".nam", ".til" })        // drop stale per-scenario caches
         { var f = outPath + ext; if (File.Exists(f)) File.Delete(f); }
@@ -194,6 +215,49 @@ internal static class Program
     {
         int p = Find(a, Ascii(tag), b.Start, b.End);
         return p < 0 ? 0 : BitConverter.ToInt32(a, p + tag.Length);
+    }
+
+    // Overwrite a fixed-width, null-padded header slot (clears the slot, keeps a trailing null).
+    private static void PatchFixed(byte[] a, int off, int slot, string val)
+    {
+        Array.Clear(a, off, slot);
+        byte[] vb = Ascii(val);
+        Array.Copy(vb, 0, a, off, Math.Min(vb.Length, slot - 1));
+    }
+
+    // CScenarioInfo block bounds (it holds the length-string NAME / CREATOR).
+    private static (int start, int end) ScenInfo(byte[] a)
+    {
+        int s = Find(a, Ascii(".?AVCScenarioInfo@@"), 0);
+        if (s < 0) return (-1, -1);
+        int e = Find(a, END, s);
+        return (s, e < 0 ? a.Length : e + END.Length);
+    }
+
+    private static string ReadLenStr(byte[] a, int start, int end, string tag)
+    {
+        int p = Find(a, Ascii(tag), start, end);
+        if (p < 0) return null;
+        int lp = p + tag.Length;
+        return Str(a, lp + 4, BitConverter.ToInt32(a, lp) - 1);
+    }
+
+    // Replace a length-string value (tag + int32 len + bytes + null), reallocating since the new
+    // value may differ in length. Sequential, self-delimiting format -> shifting the tail is safe.
+    private static byte[] ReplaceLenStr(byte[] a, int start, int end, string tag, string val)
+    {
+        int p = Find(a, Ascii(tag), start, end);
+        if (p < 0) return a;
+        int lp = p + tag.Length, vp = lp + 4;
+        int tail = vp + (BitConverter.ToInt32(a, lp) - 1) + 1;     // just past the old value + null
+        byte[] vb = Ascii(val);
+        var outp = new byte[a.Length - tail + vp + vb.Length + 1];
+        Array.Copy(a, 0, outp, 0, lp);
+        BitConverter.GetBytes(vb.Length + 1).CopyTo(outp, lp);
+        Array.Copy(vb, 0, outp, vp, vb.Length);
+        outp[vp + vb.Length] = 0;
+        Array.Copy(a, tail, outp, vp + vb.Length + 1, a.Length - tail);
+        return outp;
     }
 
     // 6-char "default" id field: <tag> + 8 bytes + 6 ascii chars.
