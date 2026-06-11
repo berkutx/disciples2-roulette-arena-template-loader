@@ -38,9 +38,10 @@ the dead-ends in [docs/how-it-works.md](docs/how-it-works.md).
 ```
 
 Requires 32-bit MinGW (`i686-w64-mingw32-g++`) for the C++ side and the .NET SDK (8+) for the C# side
-— both cross-build the Windows artifacts on Linux, so CI ([`.github/workflows/build.yml`](.github/workflows/build.yml))
-runs on Ubuntu and publishes a GitHub Release (with a SHA-256 checksum) on each `v*` tag.
-`berkutx_rng.exe` is self-contained (the .NET runtime is bundled), so players install nothing.
+— both cross-build the Windows artifacts on Linux. CI ([`build.yml`](.github/workflows/build.yml)) runs
+on Ubuntu for every push/PR; pushing a `v*` tag triggers [`release.yml`](.github/workflows/release.yml)
+to publish a GitHub Release (zip + SHA-256). `berkutx_rng.exe` is self-contained (the .NET runtime is
+bundled), so players install nothing.
 
 ## Install
 

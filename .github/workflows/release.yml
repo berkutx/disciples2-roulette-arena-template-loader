@@ -1,0 +1,49 @@
+name: release
+
+# Cuts a GitHub Release from a v* tag: builds the three artifacts, zips them with a SHA-256
+# checksum, and publishes. Runs ONLY on tags, and the write permission is scoped to this one job.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read           # default for the workflow; the release job opts into write below
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # only this job may create the release / upload assets
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4 (SHA-pinned)
+
+      - name: Install the 32-bit MinGW cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-i686
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4 (SHA-pinned)
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build -> dist/
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Package + checksum
+        shell: pwsh
+        env:
+          REF: ${{ github.ref_name }}    # via env, not inline ${{ }}, to avoid script injection
+        run: |
+          $zip = "disciples2-roulette-arena-template-loader-$env:REF.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip
+          "$((Get-FileHash $zip -Algorithm SHA256).Hash)  $zip" | Out-File "$zip.sha256" -Encoding ascii
+
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 (SHA-pinned)
+        with:
+          files: |
+            disciples2-roulette-arena-template-loader-*.zip
+            disciples2-roulette-arena-template-loader-*.zip.sha256
+          generate_release_notes: true
+          body: |
+            **Drop these three files into the Disciples II game folder, then run `berkutx_loader.exe`.**
+            Self-contained — nothing else to install. Verify the download against the published SHA-256.

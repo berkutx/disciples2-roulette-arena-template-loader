@@ -1,27 +1,26 @@
 name: build
 
-# Builds the three Windows artifacts on Linux (MinGW cross-compiles the C++; dotnet cross-publishes
-# the C#) and, on a v* tag, publishes them as a GitHub Release with a SHA-256 checksum.
+# CI: cross-compile the three Windows artifacts on Linux (MinGW for the C++, dotnet for the C#).
+# Read-only token; releases are a separate, tag-gated workflow (release.yml).
 on:
   push:
     branches: ['**']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write          # required for creating releases
+  contents: read           # least privilege — this job only reads the repo
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4 (SHA-pinned)
 
       - name: Install the 32-bit MinGW cross-compiler (hook.dll + berkutx_loader.exe target Win x86)
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-i686
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4 (SHA-pinned)
         with:
           dotnet-version: '8.0.x'
 
@@ -29,27 +28,7 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4 (SHA-pinned)
         with:
           name: disciples2-roulette-arena-template-loader
           path: dist/
-
-      - name: Package + checksum (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        run: |
-          $zip = "disciples2-roulette-arena-template-loader-${{ github.ref_name }}.zip"
-          Compress-Archive -Path dist/* -DestinationPath $zip
-          "$((Get-FileHash $zip -Algorithm SHA256).Hash)  $zip" | Out-File "$zip.sha256" -Encoding ascii
-
-      - name: Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            disciples2-roulette-arena-template-loader-*.zip
-            disciples2-roulette-arena-template-loader-*.zip.sha256
-          generate_release_notes: true
-          body: |
-            **Drop these three files into the Disciples II game folder, then run `berkutx_loader.exe`.**
-            Self-contained — nothing else to install. Verify the download against the published SHA-256.
