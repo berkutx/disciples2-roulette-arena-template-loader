@@ -1,4 +1,4 @@
-# Build the zero-dependency re-roller berkutx_rng.exe (.NET 8, framework-dependent single-file, win-x64).
+# Build the re-roller berkutx_rng.exe (.NET 8, self-contained single-file, win-x86 — RID/options in the csproj).
 # Only the authored arena .sg is embedded; the tool parses the game's dBASE tables itself.
 # Cross-builds the Windows exe on any OS that has the .NET SDK (used by CI on Linux).
 param([string]$OutDir = $PSScriptRoot)
