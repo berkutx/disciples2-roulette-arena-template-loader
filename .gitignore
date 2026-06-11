@@ -1,0 +1,10 @@
+# build outputs
+dist/
+loader/hook.dll
+loader/berkutx_loader.exe
+reroller/berkutx_rng.exe
+reroller/bin/
+reroller/obj/
+*.o
+# generated at build time from template.lua
+loader/template_lua.h

@@ -1,0 +1,55 @@
+name: build
+
+# Builds the three Windows artifacts on Linux (MinGW cross-compiles the C++; dotnet cross-publishes
+# the C#) and, on a v* tag, publishes them as a GitHub Release with a SHA-256 checksum.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write          # required for creating releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the 32-bit MinGW cross-compiler (hook.dll + berkutx_loader.exe target Win x86)
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-i686
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build -> dist/
+        shell: pwsh
+        run: ./build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: disciples2-roulette-arena-template-loader
+          path: dist/
+
+      - name: Package + checksum (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $zip = "disciples2-roulette-arena-template-loader-${{ github.ref_name }}.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip
+          "$((Get-FileHash $zip -Algorithm SHA256).Hash)  $zip" | Out-File "$zip.sha256" -Encoding ascii
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            disciples2-roulette-arena-template-loader-*.zip
+            disciples2-roulette-arena-template-loader-*.zip.sha256
+          generate_release_notes: true
+          body: |
+            **Drop these three files into the Disciples II game folder, then run `berkutx_loader.exe`.**
+            Self-contained — nothing else to install. Verify the download against the published SHA-256.
