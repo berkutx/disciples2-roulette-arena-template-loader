@@ -31,10 +31,12 @@ own reader (`CMidServerBuilderFull` = `sub_433B0B`). Whoever controls that file 
 
 ## The four hooks
 
-All hooks are 5-byte JMP detours with a trampoline. The mss32 RVAs are **per-build**: on load the hook
-reads the running `mss32.dll`'s PE **TimeDateStamp** and loads that build's address set (a prologue-byte
-signature guard still backs it up). An unknown build is logged and its mss32 hooks skipped — never
-mis-patched. The `Discipl2.exe` hooks are build-independent (the exe is identical across these mods).
+All hooks are 5-byte JMP detours with a trampoline. The mss32 targets are **resolved at runtime from
+stable anchors** (unique strings + fixed in-function offsets — identical across builds because it's the
+same toolset recompiled, only relocated), so a **re-released mod build is handled with no rebuild**. A
+PE-TimeDateStamp table of known builds is the fallback if a future build changes those shapes, and a
+prologue-byte signature guard backs both. An unknown/unresolvable build is logged and its mss32 hooks
+skipped — never mis-patched. The `Discipl2.exe` hooks are build-independent (the exe is identical here).
 
 | # | target | what we do |
 |---|---|---|
@@ -61,16 +63,24 @@ game's `Templates\` on load.
 Discipl2 (`-0x400000` for RVA, build-independent): `sub_433B0B` (played-map builder), `sub_403798` /
 `sub_4036D0` (its wrappers), `sub_4E0A8C` (host start), `sub_5E3DB7` (header reader — still rsg; cosmetic).
 
-mss32 RVAs are **per-build** (keyed on PE TimeDateStamp; `loader/hook.cpp` → `g_builds[]`). To add a
-build: find each function in its decompile (match the body — same Hex-Rays, shifted addresses), verify
-the prologue, and add a row.
+mss32 targets are resolved at runtime (`loader/hook.cpp` → `resolve_addrs`): two unique strings anchor
+two functions, and everything else is read at **fixed offsets** inside them (stable across these builds):
+
+- `"Random scenario.sg"` → its referencing function is the **race/metadata-writer**; the `call` at
+  `+0x14E` inside it targets the **rsg serializer** (where we detect our marker + arm the redirect).
+- `"BUG!\nGeneration completed…"` → its referencing function is the **generation-complete cb**; inside it
+  `+0x44` = selector, `+0x50` = timer table, `+0x5F` = `join`, `+0x66` = `sub_101D1200` cleanup. The
+  proceed-to-lobby (`sub_101D20D0`) is inlined from the cleanup + the `menu+280` transition functor, so
+  it needs no address of its own.
+
+If the body shapes ever change, the `g_builds[]` TimeDateStamp table is the fallback (verified values):
 
 | role | `last_version` (TDS `67D02351`) | `slasher_mns_2_4` (TDS `68F94146`) |
 |---|---|---|
 | rsg `.sg` serializer (save / arm) | `0x267FD0` | `0x273DE0` |
 | host-commit race-copy | `0x1D3CB0` | `0x1D40F0` |
 | generation-complete cb | `0x1D21C0` | `0x1D2600` |
-| proceed-to-lobby | `0x1D20D0` | `0x1D2510` |
+| `sub_101D1200` cleanup | `0x1D1200` | `0x1D1640` |
 | std::thread::join | `0x5BAC0` | `0x5BD40` |
 | timer dispatch table | `0x3B0DE0` | `0x3BDE40` |
 | UI selector | `0x3B1138` | `0x3BE16C` |

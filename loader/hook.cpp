@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include "template_lua.h"   // TEMPLATE_LUA[] / TEMPLATE_LUA_LEN — the fake-template stub (generated from template.lua)
 
 // mss32 sub_10267FD0 = rsg .sg serializer; the ONLY thing we gate on. __thiscall(this, wchar_t* path).
@@ -50,12 +51,10 @@ static unsigned char* g_tramp_3cb0 = 0;
 // sub_1005BAC0(menu+36)) then proceed via sub_101D20D0(menu). Our template name is the gen-descriptor
 // std::string at menu+80 (len @+96, cap @+100; MSVC SSO).
 static uint32_t RVA_21C0;         // generation-complete cb (prologue 55 8B EC 6A FF)
-static uint32_t RVA_20D0;         // proceed-to-lobby, __cdecl(menu)
+static uint32_t RVA_1200;         // sub_101D1200 cleanup (proceed-to-lobby is inlined from it)
 static uint32_t RVA_5BAC0;        // std::thread::join, __thiscall
 static uint32_t RVA_T_103B0DE0;   // timer-manager dispatch table (stop = [4*sel])
 static uint32_t RVA_SEL_103B1138; // UI-manager selector
-typedef void (__cdecl *fn_20d0)(int menu);
-static fn_20d0        g_sub_20d0   = 0;         // resolved sub_101D20D0 (proceed-to-lobby)
 static unsigned char* g_tramp_21c0 = 0;         // trampoline -> original sub_101D21C0
 static void*          g_handle_ptr = 0;         // = &handle_21c0 (stub's indirect call target)
 static HMODULE        g_mss32      = 0;         // cached mss32 base (for runtime dispatch in handle_21c0)
@@ -78,36 +77,116 @@ static void logf(const char* fmt, ...)
     }
 }
 
-// ---- per-build mss32 address profiles --------------------------------------
-// Different D2ModdingToolset builds shift the mss32 RVAs. We key on the mss32 PE
-// TimeDateStamp (unique per build) and load that build's address set. New builds:
-// find the equivalents in the decompile, verify prologues, and add a row here.
+// ---- mss32 address resolution ----------------------------------------------
+// Goal: survive a re-released mod build with NO rebuild. PRIMARY = resolve the functions/globals at
+// runtime from stable anchors (unique strings + fixed in-function offsets — identical across builds
+// because it's the same toolset recompiled, only relocated). FALLBACK = a per-build table keyed on
+// the mss32 PE TimeDateStamp. Both fill the same RVA_* globals (offsets from the loaded mss32 base).
+static const char* g_buildName = "unknown";
+
 struct Mss32Build {
-    uint32_t tds;                                                  // PE TimeDateStamp = build key
-    uint32_t save, c3cb0, c21c0, c20d0, c5bac0, timer, sel;        // the 7 per-build RVAs
+    uint32_t tds;                                              // PE TimeDateStamp = build key
+    uint32_t save, c3cb0, c21c0, c1200, c5bac0, timer, sel;
     const char* name;
 };
 static const Mss32Build g_builds[] = {
-    { 0x67D02351, 0x267FD0, 0x1D3CB0, 0x1D21C0, 0x1D20D0, 0x5BAC0, 0x3B0DE0, 0x3B1138, "standard (last_version)" },
-    { 0x68F94146, 0x273DE0, 0x1D40F0, 0x1D2600, 0x1D2510, 0x5BD40, 0x3BDE40, 0x3BE16C, "slasher_mns_2_4"         },
+    { 0x67D02351, 0x267FD0, 0x1D3CB0, 0x1D21C0, 0x1D1200, 0x5BAC0, 0x3B0DE0, 0x3B1138, "standard (last_version)" },
+    { 0x68F94146, 0x273DE0, 0x1D40F0, 0x1D2600, 0x1D1640, 0x5BD40, 0x3BDE40, 0x3BE16C, "slasher_mns_2_4"         },
 };
 
-// Read the loaded mss32's TimeDateStamp and pick the matching profile (fills the RVA_* globals).
-static const Mss32Build* select_build(HMODULE m)
+struct Sect { const unsigned char* p; uint32_t size; };
+static Sect pe_section(HMODULE m, const char* name)
+{
+    const unsigned char* b = (const unsigned char*)m;
+    uint32_t e = *(const uint32_t*)(b + 0x3C);
+    uint16_t nsec = *(const uint16_t*)(b + e + 6);
+    uint16_t optsz = *(const uint16_t*)(b + e + 20);
+    const unsigned char* s = b + e + 24 + optsz;
+    size_t nl = strlen(name);
+    for (int i = 0; i < nsec; ++i, s += 40)
+        if (memcmp(s, name, nl) == 0 && (nl >= 8 || s[nl] == 0)) {
+            Sect r = { b + *(const uint32_t*)(s + 12), *(const uint32_t*)(s + 8) };
+            return r;
+        }
+    Sect r = { 0, 0 }; return r;
+}
+static const unsigned char* mem_find(const unsigned char* hay, uint32_t n, const void* needle, uint32_t nl)
+{
+    if (!hay || nl == 0 || n < nl) return 0;
+    for (uint32_t i = 0; i + nl <= n; ++i)
+        if (memcmp(hay + i, needle, nl) == 0) return hay + i;
+    return 0;
+}
+static const unsigned char* func_start(const unsigned char* addr)   // walk back to 55 8B EC after a boundary
+{
+    for (int k = 0; k < 0x1000; ++k) {
+        const unsigned char* p = addr - k;
+        if (p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && (p[-1] == 0xC3 || p[-1] == 0xCC || p[-1] == 0x90))
+            return p;
+    }
+    return 0;
+}
+static const unsigned char* call_target(const unsigned char* e8) { return e8 + 5 + *(const int32_t*)(e8 + 1); }
+
+// PRIMARY: resolve every mss32 target from anchors. true + RVA_* filled on success.
+static bool resolve_addrs(HMODULE m)
+{
+    Sect text = pe_section(m, ".text"), rdata = pe_section(m, ".rdata");
+    if (!text.p || !rdata.p) return false;
+    const unsigned char* base = (const unsigned char*)m;
+
+    // "Random scenario.sg" -> race/metadata-writer; its serializer call (mw+0x14E) -> save/arm fn
+    const char* s1 = "Random scenario.sg";
+    const unsigned char* sv = mem_find(rdata.p, rdata.size, s1, (uint32_t)strlen(s1) + 1);
+    if (!sv) return false;
+    uint32_t svAbs = (uint32_t)(uintptr_t)sv;
+    const unsigned char* mwRef = mem_find(text.p, text.size, &svAbs, 4);
+    const unsigned char* mw = mwRef ? func_start(mwRef) : 0;
+    if (!mw || mw[0x14E] != 0xE8) return false;
+    const unsigned char* save = call_target(mw + 0x14E);
+
+    // "BUG!\n..." -> generation-complete cb; fixed offsets -> selector / timer table / join / cleanup
+    const char* s2 = "BUG!\nGeneration completed, but no scenario was created";
+    const unsigned char* bv = mem_find(rdata.p, rdata.size, s2, (uint32_t)strlen(s2) + 1);
+    if (!bv) return false;
+    uint32_t bvAbs = (uint32_t)(uintptr_t)bv;
+    const unsigned char* bref = 0;
+    for (const unsigned char* q = text.p; q + 5 <= text.p + text.size; ++q)
+        if (q[0] == 0x68 && *(const uint32_t*)(q + 1) == bvAbs) { bref = q; break; }   // push offset "BUG!.."
+    const unsigned char* cb = bref ? func_start(bref) : 0;
+    if (!cb) return false;
+    if (cb[0x43] != 0xA1 || cb[0x4E] != 0x8B || cb[0x4F] != 0x80 || cb[0x5F] != 0xE8 || cb[0x66] != 0xE8)
+        return false;                                          // body shape changed -> let the table try
+
+    RVA_3CB0 = (uint32_t)(mw - base);
+    RVA_SAVE = (uint32_t)(save - base);
+    RVA_21C0 = (uint32_t)(cb - base);
+    RVA_SEL_103B1138 = *(const uint32_t*)(cb + 0x44) - (uint32_t)(uintptr_t)base;   // mov eax,[selector]
+    RVA_T_103B0DE0   = *(const uint32_t*)(cb + 0x50) - (uint32_t)(uintptr_t)base;   // call [table+eax*4]
+    RVA_5BAC0 = (uint32_t)(call_target(cb + 0x5F) - base);                          // join
+    RVA_1200  = (uint32_t)(call_target(cb + 0x66) - base);                          // cleanup
+    g_buildName = "anchors";
+    logf("[hk] resolved by anchors: save=+0x%X race=+0x%X cb=+0x%X sel=+0x%X timer=+0x%X join=+0x%X cleanup=+0x%X",
+         RVA_SAVE, RVA_3CB0, RVA_21C0, RVA_SEL_103B1138, RVA_T_103B0DE0, RVA_5BAC0, RVA_1200);
+    return true;
+}
+
+// FALLBACK: match the loaded mss32's PE TimeDateStamp against the table (fills the RVA_* globals).
+static bool select_build(HMODULE m)
 {
     const unsigned char* base = (const unsigned char*)m;
-    uint32_t e   = *(const uint32_t*)(base + 0x3C);                // e_lfanew
-    uint32_t tds = *(const uint32_t*)(base + e + 8);              // COFF header + 8
-    for (const Mss32Build& b : g_builds) {
+    uint32_t e = *(const uint32_t*)(base + 0x3C);
+    uint32_t tds = *(const uint32_t*)(base + e + 8);
+    for (const Mss32Build& b : g_builds)
         if (b.tds == tds) {
-            RVA_SAVE = b.save; RVA_3CB0 = b.c3cb0; RVA_21C0 = b.c21c0; RVA_20D0 = b.c20d0;
+            RVA_SAVE = b.save; RVA_3CB0 = b.c3cb0; RVA_21C0 = b.c21c0; RVA_1200 = b.c1200;
             RVA_5BAC0 = b.c5bac0; RVA_T_103B0DE0 = b.timer; RVA_SEL_103B1138 = b.sel;
-            logf("[hk] mss32 build = %s (TimeDateStamp=0x%08X)", b.name, tds);
-            return &b;
+            g_buildName = b.name;
+            logf("[hk] mss32 build = %s (TimeDateStamp=0x%08X, table fallback)", b.name, tds);
+            return true;
         }
-    }
-    logf("[hk] UNKNOWN mss32 build (TimeDateStamp=0x%08X) — add a profile; mss32 hooks skipped", tds);
-    return 0;
+    logf("[hk] UNKNOWN mss32 build (TimeDateStamp=0x%08X) and anchors failed — mss32 hooks skipped", tds);
+    return false;
 }
 
 // ---- hook state ------------------------------------------------------------
@@ -418,8 +497,11 @@ extern "C" int __cdecl handle_21c0(int menu)
     if (*(int*)(menu + 40))
         ((void(__attribute__((fastcall)) *)(int, int))((char*)g_mss32 + RVA_5BAC0))(menu + 36, 0);
     logf("[hk] sub_101D21C0 status=3 tmpl='%s' -> DIALOG EXCLUDED (sub_101AFDD0 not called), proceed to lobby", nm);
-    // proceed: sub_101D20D0 closes the wait-dialog (sub_101D1200 @menu+272) and runs menu+280 -> lobby
-    if (g_sub_20d0) g_sub_20d0(menu);
+    // proceed = sub_101D20D0 inlined: cleanup (sub_101D1200, __thiscall(menu)) then run the pending
+    // transition functor at menu+280 (__cdecl(menu)) — that advances the menu state to the lobby.
+    if (RVA_1200) ((void(__attribute__((fastcall)) *)(int, int))((char*)g_mss32 + RVA_1200))(menu, 0);
+    void* next = *(void**)(menu + 280);
+    if (next) ((void(__cdecl *)(int))next)(menu);
     return 1;
 }
 
@@ -437,7 +519,6 @@ static bool install_21c0()
     unsigned char* t = (unsigned char*)m + RVA_21C0;
     if (memcmp(t, SIG, 5) != 0) { static bool w = false; if (!w) { w = true; logf("[hk] 21c0 sig mismatch %02X %02X %02X %02X %02X", t[0], t[1], t[2], t[3], t[4]); } return false; }
     g_mss32      = m;
-    g_sub_20d0   = (fn_20d0)((unsigned char*)m + RVA_20D0);
     g_handle_ptr = (void*)&handle_21c0;
 
     g_tramp_21c0 = (unsigned char*)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -470,7 +551,7 @@ static bool install_21c0()
     t[0] = 0xE9; *(int32_t*)(t + 1) = (int32_t)(stub - (t + 5));
     VirtualProtect(t, 5, op, &op);
     FlushInstructionCache(GetCurrentProcess(), t, 5);
-    logf("[hk] 21c0 dialog-exclude hook installed: t=%p tramp=%p stub=%p proceed=%p sel=%d", t, g_tramp_21c0, stub, (void*)g_sub_20d0, *(int*)((char*)m + RVA_SEL_103B1138));
+    logf("[hk] 21c0 dialog-exclude hook installed: t=%p tramp=%p stub=%p cleanup=+0x%X sel=%d", t, g_tramp_21c0, stub, RVA_1200, *(int*)((char*)m + RVA_SEL_103B1138));
     return true;
 }
 
@@ -508,14 +589,14 @@ static void ensure_stub_template()
 static DWORD WINAPI worker(LPVOID)
 {
     ensure_stub_template();   // fake template must exist before the game scans Templates\
-    // mss32.dll is already loaded when we inject into the running game; retry a few
-    // times in case of timing, and once it's mapped pick its per-build address set.
-    const Mss32Build* build = 0; bool resolved = false;
+    // mss32.dll is already loaded when we inject into the running game; retry a few times in case of
+    // timing. Once it's mapped, resolve the mss32 addresses by anchors (universal), else the table.
+    bool known = false, resolved = false;
     bool mss = false, l1 = false, l2 = false, l3 = false, skp = false, bld = false;
     for (int i = 0; i < 50; ++i) {
         HMODULE m = GetModuleHandleA("mss32.dll");
-        if (m && !resolved) { build = select_build(m); resolved = true; }
-        if (build) {                                  // mss32 hooks only on a recognized build
+        if (m && !resolved) { resolved = true; known = resolve_addrs(m) || select_build(m); }
+        if (known) {                                  // mss32 hooks only when addresses are known
             if (!mss) mss = install_hook();
             if (!l3)  l3  = install_3cb0();
             if (!skp) skp = install_21c0();
@@ -523,12 +604,12 @@ static DWORD WINAPI worker(LPVOID)
         if (!l1)  l1  = install_log_hook(RVA_4036D0, &g_tramp_36D0, LBL_36D0);
         if (!l2)  l2  = install_log_hook(RVA_403798, &g_tramp_3798, LBL_3798);
         if (!bld) bld = install_433b0b();
-        bool mssDone = resolved && (!build || (mss && l3 && skp));   // unknown build: nothing to wait on
+        bool mssDone = resolved && (!known || (mss && l3 && skp));   // unknown build: nothing to wait on
         if (mssDone && l1 && l2 && bld) break;
         Sleep(100);
     }
     logf("[hk] worker done: build=%s mss32=%d log4036D0=%d log403798=%d log3cb0=%d skip21c0=%d build433B0B=%d",
-         build ? build->name : "unknown", (int)mss, (int)l1, (int)l2, (int)l3, (int)skp, (int)bld);
+         g_buildName, (int)mss, (int)l1, (int)l2, (int)l3, (int)skp, (int)bld);
     return 0;
 }
 
