@@ -7,11 +7,19 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $gxx     = 'i686-w64-mingw32-g++'
-# windres is prefixed on the apt cross-toolchain (CI) but bare in msys2 mingw32 (local dev)
-$windres = (Get-Command 'i686-w64-mingw32-windres' -ErrorAction SilentlyContinue) ??
-           (Get-Command 'windres' -ErrorAction SilentlyContinue)
-if (-not $windres) { throw "windres not found (need i686-w64-mingw32-windres or windres on PATH)" }
-$windres = $windres.Source
+# windres MUST match g++'s target (32-bit pe-i386). Prefer the prefixed cross tool (apt CI), then the
+# windres sitting next to g++ (msys2 mingw32 layout), and only then a bare `windres` on PATH — on msys2 a
+# bare windres resolves to /usr/bin/windres, whose object the 32-bit linker rejects ("file format not
+# recognized").
+$gxxCmd  = Get-Command $gxx -ErrorAction SilentlyContinue
+$gxxDir  = if ($gxxCmd) { Split-Path $gxxCmd.Source } else { $null }
+$windres = (Get-Command 'i686-w64-mingw32-windres' -ErrorAction SilentlyContinue).Source
+if (-not $windres -and $gxxDir) {
+    $sib = Join-Path $gxxDir 'windres.exe'
+    if (Test-Path $sib) { $windres = $sib }
+}
+if (-not $windres) { $windres = (Get-Command 'windres' -ErrorAction SilentlyContinue).Source }
+if (-not $windres) { throw "windres not found (need i686-w64-mingw32-windres, windres next to g++, or windres on PATH)" }
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
