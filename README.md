@@ -45,9 +45,12 @@ bundled), so players install nothing.
 
 ## Install
 
-Drop the three files from `dist/` into the *Disciples II* game folder, launch the game, then run
-`berkutx_loader.exe` (no arguments — it finds the running game and injects the hook; the hook installs
-the fake template automatically). Random scenario → **Roulette Arena** → Continue → host.
+Drop the three files from `dist/` into the *Disciples II* game folder and run `berkutx_loader.exe`
+with no arguments — it launches the game itself, waits for it to come up, and injects the hook (which
+installs the fake template automatically). Random scenario → **Roulette Arena** → Continue → host.
+
+Other modes: `berkutx_loader.exe <pid>` injects into a specific running instance, and
+`berkutx_loader.exe -a` (or `--attach`) attaches to the first running game without launching one.
 
 ## Status
 
