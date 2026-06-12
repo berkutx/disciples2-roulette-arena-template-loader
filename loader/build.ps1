@@ -1,12 +1,22 @@
-# Build the x86 hook DLL + loader (the game and mss32.dll are 32-bit).
-# Emits hook.dll + berkutx_loader.exe into $OutDir (default: this folder).
-# Cross-platform paths (Join-Path) so it runs on Windows and on the Linux CI.
-param([string]$OutDir = $PSScriptRoot)
+# Build the self-contained x86 loader: compile hook.dll, embed it + berkutx_rng.exe as RCDATA
+# resources, and link berkutx_loader.exe — the single file that gets shipped. The loader unpacks
+# the payload at runtime. Cross-platform paths (Join-Path) so it runs on Windows and on the Linux CI.
+param(
+    [string]$OutDir = $PSScriptRoot,
+    [string]$RngExe                       # pre-built berkutx_rng.exe to embed (built by the top-level build.ps1)
+)
 $ErrorActionPreference = 'Stop'
-$gxx = 'i686-w64-mingw32-g++'
+$gxx     = 'i686-w64-mingw32-g++'
+# windres is prefixed on the apt cross-toolchain (CI) but bare in msys2 mingw32 (local dev)
+$windres = (Get-Command 'i686-w64-mingw32-windres' -ErrorAction SilentlyContinue) ??
+           (Get-Command 'windres' -ErrorAction SilentlyContinue)
+if (-not $windres) { throw "windres not found (need i686-w64-mingw32-windres or windres on PATH)" }
+$windres = $windres.Source
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+    $stage = Join-Path $PSScriptRoot '_build'
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
     # Embed the fake-template stub: template.lua -> template_lua.h (byte array).
     $bytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'template.lua'))
@@ -21,10 +31,28 @@ try {
     [void]$sb.AppendLine("static const unsigned TEMPLATE_LUA_LEN = $($bytes.Length);")
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'template_lua.h'), $sb.ToString())
 
-    $dll = Join-Path $OutDir 'hook.dll'
+    # 1) hook.dll — embedded in the loader, not shipped on its own
+    $hookDll = Join-Path $stage 'hook.dll'
+    & $gxx -shared -O2 -s -static -o $hookDll hook.cpp -lkernel32
+    if ($LASTEXITCODE -ne 0) { throw "hook.dll build failed ($LASTEXITCODE)" }
+
+    # 2) the re-roller to embed
+    if (-not $RngExe) { $RngExe = Join-Path $OutDir 'berkutx_rng.exe' }
+    if (-not (Test-Path $RngExe)) { throw "berkutx_rng.exe not found at '$RngExe' — build the reroller first (use the top-level build.ps1)" }
+    $RngExe = (Resolve-Path $RngExe).Path
+
+    # 3) resources.rc -> resources.o  (forward slashes for the windres preprocessor)
+    $rc = "HOOKDLL RCDATA `"$($hookDll -replace '\\','/')`"`nRNGEXE RCDATA `"$($RngExe -replace '\\','/')`"`n"
+    $rcPath = Join-Path $stage 'resources.rc'
+    $resObj = Join-Path $stage 'resources.o'
+    [IO.File]::WriteAllText($rcPath, $rc)
+    & $windres -i $rcPath -o $resObj
+    if ($LASTEXITCODE -ne 0) { throw "windres failed ($LASTEXITCODE)" }
+
+    # 4) link the self-contained loader (the single shipped file)
     $exe = Join-Path $OutDir 'berkutx_loader.exe'
-    & $gxx -shared -O2 -s -static -o $dll hook.cpp -lkernel32
-    & $gxx -O2 -s -static -municode -o $exe berkutx_loader.cpp
-    Write-Host ("hook.dll            {0,7} bytes" -f (Get-Item $dll).Length)
-    Write-Host ("berkutx_loader.exe  {0,7} bytes" -f (Get-Item $exe).Length)
+    & $gxx -O2 -s -static -municode -o $exe berkutx_loader.cpp $resObj
+    if ($LASTEXITCODE -ne 0) { throw "berkutx_loader.exe build failed ($LASTEXITCODE)" }
+    Write-Host ("berkutx_loader.exe  {0,9} bytes  (embeds hook.dll {1} b + berkutx_rng.exe {2} b)" -f `
+        (Get-Item $exe).Length, (Get-Item $hookDll).Length, (Get-Item $RngExe).Length)
 } finally { Pop-Location }

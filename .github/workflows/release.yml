@@ -45,5 +45,7 @@ jobs:
             disciples2-roulette-arena-template-loader-*.zip.sha256
           generate_release_notes: true
           body: |
-            **Drop these three files into the Disciples II game folder, then run `berkutx_loader.exe`.**
-            Self-contained — nothing else to install. Verify the download against the published SHA-256.
+            **Drop `berkutx_loader.exe` into the Disciples II game folder and run it.**
+            One self-contained file — it unpacks its embedded hook + re-roller, launches the game and
+            injects the hook (no arguments needed). Nothing else to install. Verify the download against
+            the published SHA-256.

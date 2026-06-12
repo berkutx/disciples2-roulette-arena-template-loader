@@ -1,10 +1,13 @@
 # build outputs
 dist/
+build-stage/
+loader/_build/
 loader/hook.dll
 loader/berkutx_loader.exe
 reroller/berkutx_rng.exe
 reroller/bin/
 reroller/obj/
 *.o
-# generated at build time from template.lua
+# generated at build time
 loader/template_lua.h
+loader/resources.rc

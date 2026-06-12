@@ -179,8 +179,11 @@ static bool install_hook()
     unsigned char* target = (unsigned char*)m + RVA_SAVE;
 
     if (memcmp(target, SIG, 5) != 0) {                // build guard: refuse unknown prologue
-        logf("[hk] SIGNATURE MISMATCH at mss32+0x%X (got %02X %02X %02X %02X %02X) — not patching",
-             RVA_SAVE, target[0], target[1], target[2], target[3], target[4]);
+        static bool warned = false;                   // log once — the worker retries, but a mismatch is permanent
+        if (!warned) { warned = true;
+            logf("[hk] SIGNATURE MISMATCH at mss32+0x%X (got %02X %02X %02X %02X %02X) — wrong mss32 build, not patching",
+                 RVA_SAVE, target[0], target[1], target[2], target[3], target[4]);
+        }
         return false;
     }
 
@@ -229,7 +232,7 @@ static bool install_433b0b()
     HMODULE exe = GetModuleHandleW(NULL);
     if (!exe) return false;
     unsigned char* t = (unsigned char*)exe + RVA_433B0B;
-    if (t[0] != 0xB8) { logf("[hk] 433B0B sig mismatch (%02X) — not patching", t[0]); return false; }
+    if (t[0] != 0xB8) { static bool w = false; if (!w) { w = true; logf("[hk] 433B0B sig mismatch (%02X) — not patching", t[0]); } return false; }
     // trampoline: stolen 5 bytes (mov eax,imm32 of the EH-prolog) + jmp to t+5 (the call _EH_prolog)
     g_tramp_433b0b = (unsigned char*)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!g_tramp_433b0b) return false;
@@ -269,7 +272,7 @@ static bool install_log_hook(uint32_t rva, unsigned char** trampOut, const char*
     HMODULE exe = GetModuleHandleW(NULL);
     if (!exe) return false;
     unsigned char* t = (unsigned char*)exe + rva;
-    if (t[0] != 0xB8) { logf("[hk] log-hook @0x%X sig mismatch (%02X)", rva, t[0]); return false; }
+    if (t[0] != 0xB8) { static bool w = false; if (!w) { w = true; logf("[hk] log-hook @0x%X sig mismatch (%02X)", rva, t[0]); } return false; }
     unsigned char* tr = (unsigned char*)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!tr) return false;
     memcpy(tr, t, 5); tr[5] = 0xE9; *(int32_t*)(tr + 6) = (int32_t)((t + 5) - (tr + 10));
@@ -330,7 +333,7 @@ static bool install_3cb0()
     HMODULE m = GetModuleHandleA("mss32.dll");
     if (!m) return false;
     unsigned char* t = (unsigned char*)m + RVA_3CB0;
-    if (memcmp(t, SIG, 5) != 0) { logf("[hk] 3cb0 sig mismatch %02X %02X %02X %02X %02X", t[0], t[1], t[2], t[3], t[4]); return false; }
+    if (memcmp(t, SIG, 5) != 0) { static bool w = false; if (!w) { w = true; logf("[hk] 3cb0 sig mismatch %02X %02X %02X %02X %02X", t[0], t[1], t[2], t[3], t[4]); } return false; }
     g_tramp_3cb0 = (unsigned char*)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!g_tramp_3cb0) return false;
     memcpy(g_tramp_3cb0, t, 5);
@@ -399,7 +402,7 @@ static bool install_21c0()
     HMODULE m = GetModuleHandleA("mss32.dll");
     if (!m) return false;
     unsigned char* t = (unsigned char*)m + RVA_21C0;
-    if (memcmp(t, SIG, 5) != 0) { logf("[hk] 21c0 sig mismatch %02X %02X %02X %02X %02X", t[0], t[1], t[2], t[3], t[4]); return false; }
+    if (memcmp(t, SIG, 5) != 0) { static bool w = false; if (!w) { w = true; logf("[hk] 21c0 sig mismatch %02X %02X %02X %02X %02X", t[0], t[1], t[2], t[3], t[4]); } return false; }
     g_mss32      = m;
     g_sub_20d0   = (fn_20d0)((unsigned char*)m + RVA_20D0);
     g_handle_ptr = (void*)&handle_21c0;

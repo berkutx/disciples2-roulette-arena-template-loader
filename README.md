@@ -14,8 +14,8 @@ reverse-engineering (IDA) found the exact functions to redirect. See
 
 | | | |
 |---|---|---|
-| `loader/` | C++ (x86) | `berkutx_loader.exe` injects `hook.dll`; the hook installs the inline hooks and embeds the fake-template stub. |
-| `reroller/` | C# (.NET) | `berkutx_rng.exe` re-rolls the arena's content (camps / chests / gatherer) by swapping ID strings + stats in place. It parses the game's dBASE tables for the unit/item pools and embeds the arena `.sg` — a single self-contained ~12 MB exe (the .NET runtime is bundled, nothing to install). |
+| `loader/` | C++ (x86) | `berkutx_loader.exe` — the single shipped file. It **embeds** `hook.dll` and `berkutx_rng.exe` (RCDATA), unpacks them on launch, then launches the game and injects the hook. Traces each run to `berkutx_loader.log`. |
+| `reroller/` | C# (.NET) | `berkutx_rng.exe` re-rolls the arena's content (camps / chests / gatherer) by swapping ID strings + stats in place. It parses the game's dBASE tables for the unit/item pools and embeds the arena `.sg`. Self-contained (~11 MB, .NET runtime bundled) and shipped **inside** the loader. |
 | `docs/` | | The reverse-engineering write-up: the rsg → played-scenario bridge and why the obvious approaches miss. |
 
 ## How it works (short)
@@ -34,26 +34,31 @@ the dead-ends in [docs/how-it-works.md](docs/how-it-works.md).
 ## Build
 
 ```powershell
-./build.ps1        # -> dist/  (berkutx_loader.exe, hook.dll, berkutx_rng.exe)
+./build.ps1        # -> dist/berkutx_loader.exe  (single self-contained file)
 ```
 
-Requires 32-bit MinGW (`i686-w64-mingw32-g++`) for the C++ side and the .NET SDK (8+) for the C# side
-— both cross-build the Windows artifacts on Linux. CI ([`build.yml`](.github/workflows/build.yml)) runs
-on Ubuntu for every push/PR; pushing a `v*` tag triggers [`release.yml`](.github/workflows/release.yml)
-to publish a GitHub Release (zip + SHA-256). `berkutx_rng.exe` is self-contained (the .NET runtime is
-bundled), so players install nothing.
+Requires 32-bit MinGW (`i686-w64-mingw32-g++` + `windres`) for the C++ side and the .NET SDK (8+) for the
+C# side — both cross-build the Windows artifacts on Linux. The re-roller is built first, then the loader
+embeds it + `hook.dll` as resources. CI ([`build.yml`](.github/workflows/build.yml)) runs on Ubuntu for
+every push/PR; pushing a `v*` tag triggers [`release.yml`](.github/workflows/release.yml) to publish a
+GitHub Release (zip + SHA-256). The loader is fully self-contained, so players copy a single file and
+install nothing.
 
 ## Install
 
-Drop the three files from `dist/` into the *Disciples II* game folder and run `berkutx_loader.exe`
-with no arguments — it launches the game itself, waits for it to come up, and injects the hook (which
-installs the fake template automatically). Random scenario → **Roulette Arena** → Continue → host.
+Drop the single `berkutx_loader.exe` from `dist/` into the *Disciples II* game folder and run it with no
+arguments — it unpacks its embedded hook + re-roller (into `%LOCALAPPDATA%\berkutx_roulette\`), launches
+the game, waits for it to come up, and injects the hook (which installs the fake template automatically).
+Random scenario → **Roulette Arena** → Continue → host. Each run is traced to `berkutx_loader.log` next
+to the exe.
 
-Other modes: `berkutx_loader.exe <pid>` injects into a specific running instance, and
-`berkutx_loader.exe -a` (or `--attach`) attaches to the first running game without launching one.
+Other modes: `berkutx_loader.exe <pid>` injects into a specific running instance, `berkutx_loader.exe -a`
+(or `--attach`) attaches to the first running game without launching one, and a trailing
+`path\to\hook.dll` overrides the embedded hook.
 
 ## Status
 
-Working in hotseat. Targets are matched against fixed RVAs + a prologue signature for one mod build;
-production hardening (signature/RTTI resolution, an `.ini` for paths/factions, auto-load at game
-start) is tracked in `loader/` TODOs.
+Working in hotseat on the targeted mod build. The mss32 hooks are matched against fixed RVAs + a prologue
+signature; on a *different* `mss32.dll` build the guard refuses to patch (logged once in
+`berkutx_roulette.log`) instead of crashing — porting needs the RVAs re-found for that build. Further
+hardening (signature/RTTI resolution, an `.ini` for paths/factions) is tracked in `loader/` TODOs.
