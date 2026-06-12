@@ -60,11 +60,13 @@ internal static class Program
         foreach (int r in gunits.Rows())
         {
             string id = gunits.Str(r, "unit_id");
-            if (id.Length != 0) stats[id] = (Math.Max(1, gunits.Int(r, "level")), gunits.Int(r, "hit_point"));
+            int hp = gunits.Int(r, "hit_point");
+            if (id.Length != 0) stats[id] = (Math.Max(1, gunits.Int(r, "level")), hp);
             if (gunits.Bool(r, "water_only")) continue;
             int cat = gunits.Int(r, "unit_cat");
             if (cat == 0 && gunits.Int(r, "leadership") <= 0 && !id.Equals(Gargoyle, StringComparison.OrdinalIgnoreCase)) soldiers.Add(id);
-            if (cat == 2 && gunits.Str(r, "leader_cat").Length > 0) leaders.Add(id);
+            // gatherer leader: must be a leader class, with HP in [150, 899] (no glass cannons, no end-bosses)
+            if (cat == 2 && gunits.Str(r, "leader_cat").Length > 0 && hp >= 150 && hp <= 899) leaders.Add(id);
         }
         var gitem = new Dbf(Path.Combine(install, "Globals", "GItem.dbf"));
         foreach (int r in gitem.Rows())
