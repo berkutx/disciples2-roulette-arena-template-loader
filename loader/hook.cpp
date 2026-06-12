@@ -25,6 +25,7 @@ static const uint32_t RVA_433B0B = 0x00033B0B;
 
 // Resolved at load by init_paths(): berkutx_rng.exe sits next to this DLL; Exports\ / Templates\ hang off the game exe.
 static wchar_t g_rngExe[MAX_PATH]       = {0};
+static wchar_t g_gameDir[MAX_PATH]      = {0};   // game folder (trailing '\') — passed to the re-roller so it finds Globals\*.dbf
 static wchar_t g_templatesLua[MAX_PATH] = {0};
 static wchar_t g_exportsDir[MAX_PATH]   = {0};
 static char    OUR_PATH_A[MAX_PATH]     = {0};   // current roll's seed file: ADDRESS baked into the sub_433B0B stub, CONTENT set per roll
@@ -230,11 +231,17 @@ static bool file_contains(const wchar_t* path, const char* needle)
     return found;
 }
 
-// Roll a fresh arena into `outPath` via berkutx_rng.exe <seed> <out.sg> (the template is embedded in the exe).
+// Roll a fresh arena into `outPath` via berkutx_rng.exe <seed> <out.sg> <gameDir> (template embedded
+// in the exe; gameDir tells the re-roller where the game's Globals\*.dbf pools live — it no longer
+// sits in the game folder since the loader unpacks it elsewhere).
 static bool run_roulette(unsigned seed, const wchar_t* outPath)
 {
+    wchar_t gd[MAX_PATH];
+    wcsncpy(gd, g_gameDir, MAX_PATH); gd[MAX_PATH - 1] = 0;
+    size_t gn = wcslen(gd);
+    if (gn && (gd[gn - 1] == L'\\' || gd[gn - 1] == L'/')) gd[gn - 1] = 0;   // strip trailing '\' (else \" escapes the quote)
     wchar_t cmd[2048];
-    _snwprintf(cmd, 2048, L"\"%s\" %u \"%s\"", g_rngExe, seed, outPath);
+    _snwprintf(cmd, 2048, L"\"%s\" %u \"%s\" \"%s\"", g_rngExe, seed, outPath, gd);
     cmd[2047] = 0;
     STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
     PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
@@ -262,8 +269,9 @@ static void __attribute__((fastcall)) hk_save(void* thisp, void* edx, const void
     const wchar_t* path = wstr_data(pathWStr);     // extract chars from the std::wstring
     bool mark = path && file_contains(path, MARKER);   // our template's marker in the just-saved rsg scenario
     logf("[hk] save fired path='%ls' (ourTemplate=%d)", path ? path : L"(null)", (int)mark);
-    // Arm/disarm the game-side hijack: only when THIS host-start used our template.
-    g_ourArena = mark ? 1 : 0;
+    // Arm/disarm the game-side hijack. Disarm by default; arm ONLY after a successful roll, so a
+    // failed re-roll falls back to the rsg map instead of redirecting the build to a missing file.
+    g_ourArena = 0;
     if (mark) {
         // Roll a FRESH SEED-NAMED arena into OUR OWN file (the game's rsg "Random scenario.sg" is
         // left untouched; sub_433B0B then redirects the played-map build to this file). The unique
@@ -277,6 +285,7 @@ static void __attribute__((fastcall)) hk_save(void* thisp, void* edx, const void
         if (ok) {
             lstrcpynA(OUR_PATH_A, outA, MAX_PATH);        // sub_433B0B redirect target (content; its address is baked into the stub)
             lstrcpynW(g_prev_arena_w, outW, MAX_PATH);
+            g_ourArena = 1;                               // redirect the build only when our arena actually exists
         }
         logf("[hk] %s (seed=%u) -> %ls", ok ? "rolled arena; g_ourArena armed"
                                             : "berkutx_rng FAILED (arena NOT rolled)", seed, outW);
@@ -570,6 +579,7 @@ static void init_paths(HMODULE self)
     dir_of(self, hookDir);   // berkutx_rng.exe sits next to this DLL
     dir_of(NULL, gameDir);   // Exports\ / Templates\ hang off the game exe
     _snwprintf(g_rngExe,       MAX_PATH, L"%sberkutx_rng.exe", hookDir);
+    _snwprintf(g_gameDir,      MAX_PATH, L"%s", gameDir);
     _snwprintf(g_exportsDir,   MAX_PATH, L"%sExports\\", gameDir);
     _snwprintf(g_templatesLua, MAX_PATH, L"%sTemplates\\Roulette Arena.lua", gameDir);
     _snwprintf(g_logPath,      MAX_PATH, L"%sberkutx_roulette.log", gameDir);
