@@ -42,9 +42,15 @@ internal static class Program
     {
         int seed = Environment.TickCount;
         string outPath = null, install = AppContext.BaseDirectory.TrimEnd('\\', '/');
+        string mode = "random";      // random | balance
+        string chests = "all";       // all | potions
+        bool perks = false;          // grant the gatherer item-category knowledge
         foreach (var a in args)
         {
-            if (int.TryParse(a, out int s)) seed = s;
+            if (a.StartsWith("mode=", StringComparison.OrdinalIgnoreCase)) mode = a.Substring(5).ToLowerInvariant();
+            else if (a.StartsWith("chests=", StringComparison.OrdinalIgnoreCase)) chests = a.Substring(7).ToLowerInvariant();
+            else if (a.StartsWith("perks=", StringComparison.OrdinalIgnoreCase)) perks = a.Substring(6) is "1" or "true" or "on";
+            else if (int.TryParse(a, out int s)) seed = s;
             else if (a.EndsWith(".sg", StringComparison.OrdinalIgnoreCase)) outPath = a;
             else if (Directory.Exists(a)) install = a;
         }
@@ -68,11 +74,17 @@ internal static class Program
             // gatherer leader: must be a leader class, with HP in [150, 899] (no glass cannons, no end-bosses)
             if (cat == 2 && gunits.Str(r, "leader_cat").Length > 0 && hp >= 150 && hp <= 899) leaders.Add(id);
         }
+        // item categories (= GItem.dbf item_cat, 0-based, per D2RSG enums.h):
+        //   0 Armor 1 Jewel 2 Weapon 3 Banner 4 PotionBoost 5 PotionHeal 6 PotionRevive
+        //   7 PotionPermanent 8 Scroll 9 Wand 10 Valuable 11 Orb 12 Talisman 13 TravelItem 14 Special
         var gitem = new Dbf(Path.Combine(install, "Globals", "GItem.dbf"));
         foreach (int r in gitem.Rows())
         {
             int c = gitem.Int(r, "item_cat");
-            if (c != 10 && c != 13 && c != 14) items.Add(gitem.Str(r, "item_id"));
+            bool keep = chests == "potions"
+                ? (c >= 4 && c <= 7)              // potions only: Boost/Heal/Revive/Permanent
+                : (c != 10 && c != 13 && c != 14); // all: drop Valuable/TravelItem/Special
+            if (keep) items.Add(gitem.Str(r, "item_id"));
         }
         if (soldiers.Count == 0 || leaders.Count == 0 || items.Count == 0)
         { Console.WriteLine($"[rng ERR] empty pool (game data not found at {install})"); return 1; }
@@ -151,7 +163,7 @@ internal static class Program
         { var f = outPath + ext; if (File.Exists(f)) File.Delete(f); }
         var lua = Path.ChangeExtension(outPath, ".lua"); if (File.Exists(lua)) File.Delete(lua);
 
-        Console.WriteLine($"[rng] seed={seed} camps={nCamp}(pool {soldiers.Count}) chests={nChest}(pool {items.Count}) gatherers={nGath}(pool {leaders.Count})");
+        Console.WriteLine($"[rng] mode={mode} chests={chests} perks={perks} | seed={seed} camps={nCamp}(pool {soldiers.Count}) chests={nChest}(pool {items.Count}) gatherers={nGath}(pool {leaders.Count})");
         Console.WriteLine("[rng] wrote " + outPath);
         return 0;
     }
