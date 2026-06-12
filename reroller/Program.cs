@@ -61,18 +61,18 @@ internal static class Program
         var soldiers = new List<string>();
         var leaders  = new List<string>();
         var items    = new List<string>();
-        var stats    = new Dictionary<string, (int lvl, int hp)>(StringComparer.OrdinalIgnoreCase);
+        var stats    = new Dictionary<string, (int lvl, int hp, int xp)>(StringComparer.OrdinalIgnoreCase);
         var gunits = new Dbf(Path.Combine(install, "Globals", "Gunits.dbf"));
         foreach (int r in gunits.Rows())
         {
             string id = gunits.Str(r, "unit_id");
             int hp = gunits.Int(r, "hit_point");
-            if (id.Length != 0) stats[id] = (Math.Max(1, gunits.Int(r, "level")), hp);
+            if (id.Length != 0) stats[id] = (Math.Max(1, gunits.Int(r, "level")), hp, gunits.Int(r, "xp_killed"));
             if (gunits.Bool(r, "water_only")) continue;
             int cat = gunits.Int(r, "unit_cat");
             if (cat == 0 && gunits.Int(r, "leadership") <= 0 && !id.Equals(Gargoyle, StringComparison.OrdinalIgnoreCase)) soldiers.Add(id);
-            // gatherer leader: must be a leader class, with HP in [150, 899] (no glass cannons, no end-bosses)
-            if (cat == 2 && gunits.Str(r, "leader_cat").Length > 0 && hp >= 150 && hp <= 899) leaders.Add(id);
+            // gatherer leader: must be a leader class, with HP in [200, 899] (no glass cannons, no end-bosses)
+            if (cat == 2 && gunits.Str(r, "leader_cat").Length > 0 && hp >= 200 && hp <= 899) leaders.Add(id);
         }
         // item categories (= GItem.dbf item_cat, 0-based, per D2RSG enums.h):
         //   0 Armor 1 Jewel 2 Weapon 3 Banner 4 PotionBoost 5 PotionHeal 6 PotionRevive
@@ -101,6 +101,52 @@ internal static class Program
         foreach (var lane in camps.GroupBy(c => ReadInt(sg, c, "POS_Y")))
             foreach (var c in lane.OrderBy(c => ReadInt(sg, c, "POS_X")).Take(2)) freshLook.Add(c);
 
+        // balance mode: all 14 camps get INDEPENDENT random HP-limited soldiers (no pairing between the two
+        // players' camps). We only balance the TOTALS: brute-force a random draw of 14 into a 7/7 split whose
+        // two XP_KILLED side-sums are as equal as possible, then drop each half onto a side in random order.
+        var campAssign = new Dictionary<Block, string>();
+        if (mode == "balance")
+        {
+            var balPool = soldiers.Where(id => stats.TryGetValue(id, out var s) && s.hp < 900).ToList();   // camps: only the < 900 cap (weak units allowed)
+            var sideCamps = camps.GroupBy(c => ReadInt(sg, c, "POS_Y")).Select(g => g.ToList()).ToList();
+            if (balPool.Count >= 2 && sideCamps.Count == 2 && sideCamps[0].Count == sideCamps[1].Count)
+            {
+                int per = sideCamps[0].Count, total = per * 2;
+                var masks = new List<int>();
+                for (int m = 0; m < (1 << total); m++) if (PopCount(m) == per) masks.Add(m);   // all 7/7 splits
+                string[] best = null; int bestMask = 0; long bestDiff = long.MaxValue;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                for (int it = 0; it < 2000 && bestDiff > 0 && sw.ElapsedMilliseconds < 2500; it++)
+                {
+                    var pk = new string[total]; var xp = new long[total]; long tot = 0;
+                    for (int i = 0; i < total; i++) { pk[i] = balPool[rng.Next(balPool.Count)]; xp[i] = stats[pk[i]].xp; tot += xp[i]; }
+                    foreach (int m in masks)
+                    {
+                        long sa = 0;
+                        for (int i = 0; i < total; i++) if ((m & (1 << i)) != 0) sa += xp[i];
+                        long d = Math.Abs(2 * sa - tot);                            // |sumA - sumB|
+                        if (d < bestDiff) { bestDiff = d; best = pk; bestMask = m; if (d == 0) break; }
+                    }
+                }
+                if (best != null)
+                {
+                    var a = new List<string>(); var b2 = new List<string>();
+                    for (int i = 0; i < total; i++) (((bestMask >> i) & 1) != 0 ? a : b2).Add(best[i]);
+                    Shuffle(a, rng); Shuffle(b2, rng);
+                    for (int i = 0; i < per; i++) { campAssign[sideCamps[0][i]] = a[i].ToUpperInvariant(); campAssign[sideCamps[1][i]] = b2[i].ToUpperInvariant(); }
+                }
+            }
+        }
+
+        // perks: modifier IDs granting the gatherer item-category use (Equip-* family, unconditional)
+        string[] perkMods = { "G000UM9023", "G000UM9024", "G000UM9025", "G000UM9027", "G000UM9029" }; // arts, relics, banners, orbs, scrolls
+        var gatherUnits = new List<string>();   // gatherer CMidUnit OBJ_IDs (post-loop perks + name)
+        var castleUnits = new List<string>();   // capital-hero CMidUnit OBJ_IDs (post-loop name)
+
+        // object-placement grid: the engine reads CMidgardPlan for tile occupancy, so a moved stack must be
+        // re-pinned here too (otherwise the icon moves but the unit stays logically on its old tile).
+        var plan = blocks.FirstOrDefault(x => x.Class == "CMidgardPlan");
+
         int nCamp = 0, nChest = 0, nGath = 0;
         foreach (var b in blocks)
         {
@@ -108,7 +154,7 @@ internal static class Program
             {
                 case "CMidSiteMercs":                                        // camp: recruit unit + its stats + look
                 {
-                    string uid = Pick(rng, soldiers);
+                    string uid = campAssign.TryGetValue(b, out var pre) ? pre : Pick(rng, soldiers);   // balance pre-assigns; random picks fresh
                     if (PatchLenStr(sg, b, "UNIT_ID", uid, out int valEnd))
                     {
                         PatchInt(sg, b, "UNIT_LEVEL", stats.TryGetValue(uid, out var st) ? st.lvl : 1, valEnd);
@@ -123,10 +169,18 @@ internal static class Program
                         if (byId.TryGetValue(iid, out var it) && it.Class == "CMidItem"
                             && PatchLenStr(sg, it, "ITEM_TYPE", Pick(rng, items), out _)) nChest++;
                     break;
-                case "CMidStack":                                            // gatherer: field stack leader
+                case "CMidStack":
                 {
-                    if (ReadDefStr(sg, b, "INSIDE") != "000000") break;
+                    string inside = ReadDefStr(sg, b, "INSIDE");
                     string lid = ReadDefStr(sg, b, "LEADER_ID");
+                    if (inside != "000000")                                  // stack inside a fort = a capital hero
+                    {
+                        if (lid != null) castleUnits.Add(lid);               // name it "use the other hero" later
+                        break;
+                    }
+                    int newX = ReadInt(sg, b, "POS_X") + 3;                  // nudge the gatherer 3 cells toward the camps (along the road)
+                    PatchInt(sg, b, "POS_X", newX);                          // stack position (the icon)
+                    PatchPlanPos(sg, plan, b.ObjId, newX, ReadInt(sg, b, "POS_Y"));  // and the occupancy grid (the physical tile) — must match
                     if (lid == null || !byId.TryGetValue(lid, out var u) || u.Class != "CMidUnit") break;
                     string lt = Pick(rng, leaders);
                     if (PatchLenStr(sg, u, "TYPE", lt, out int valEnd))
@@ -134,6 +188,7 @@ internal static class Program
                         PatchInt(sg, u, "LEVEL", 1, valEnd);                  // the LEVEL right after TYPE (not DYNLEVEL)
                         int hpFrom = Find(sg, Ascii("DYNLEVEL"), u.Start, u.End);   // HP sits just past DYNLEVEL
                         PatchInt(sg, u, "HP", stats.TryGetValue(lt, out var st) ? st.hp : 65, hpFrom < 0 ? valEnd : hpFrom);
+                        if (u.ObjId != null) gatherUnits.Add(u.ObjId);            // remember for the post-loop perk/name pass
                         nGath++;
                     }
                     break;
@@ -141,22 +196,30 @@ internal static class Program
             }
         }
 
-        // --- stamp the scenario name with the generation time + set the designer to berkutx ---
+        // perks: append the item-use modifier IDs to each gatherer's CMidUnit (variable-length -> after the in-place pass)
+        if (perks)
+            foreach (var uid in gatherUnits)
+                sg = AddPerks(sg, uid, perkMods);
+
+        // hero names (cp1251): gatherer -> "Сборщик"; capital hero -> "ходи другим героем" (hint: move the gatherer)
+        foreach (var uid in gatherUnits) sg = SetUnitName(sg, uid, NameGatherer);
+        foreach (var uid in castleUnits) sg = SetUnitName(sg, uid, NameCastle);
+
+        // --- set the scenario name to "luckytest <date>" + the designer to berkutx ---
         const string Designer = "berkutx";
-        string stamp = " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
-        // header copy (fixed-width slots): _Name @321/64, _Author @299/21 — drives the list display
-        string hdrName = Str(sg, 321, 64); int z = hdrName.IndexOf('\0'); if (z >= 0) hdrName = hdrName[..z];
-        PatchFixed(sg, 321, 64, hdrName + stamp);
-        PatchFixed(sg, 299, 21, Designer);
+        const string MapName  = "luckytest";   // map name everywhere (overrides the embedded arena's name)
+        string fullName = MapName + " " + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        PatchFixed(sg, 321, 64, fullName);     // header _Name @321/64 (drives the list display)
+        PatchFixed(sg, 299, 21, Designer);     // header _Author @299/21
         // CScenarioInfo copy (length-strings): re-locate the block after each splice shifts the tail
         var (cs, ce) = ScenInfo(sg);
         if (cs >= 0)
         {
-            sg = ReplaceLenStr(sg, cs, ce, "NAME", (ReadLenStr(sg, cs, ce, "NAME") ?? hdrName) + stamp);
+            sg = ReplaceLenStr(sg, cs, ce, "NAME", fullName);
             (cs, ce) = ScenInfo(sg);
             sg = ReplaceLenStr(sg, cs, ce, "CREATOR", Designer);
         }
-        Console.WriteLine($"[rng] name=\"{hdrName}{stamp}\" designer={Designer}");
+        Console.WriteLine($"[rng] name=\"{fullName}\" designer={Designer}");
 
         File.WriteAllBytes(outPath, sg);
         foreach (var ext in new[] { ".id0", ".id1", ".nam", ".til" })        // drop stale per-scenario caches
@@ -169,6 +232,9 @@ internal static class Program
     }
 
     private static string Pick(Random r, List<string> pool) => pool[r.Next(pool.Count)].ToUpperInvariant();
+
+    private static int PopCount(int x) { int c = 0; while (x != 0) { c += x & 1; x >>= 1; } return c; }
+    private static void Shuffle(List<string> l, Random r) { for (int i = l.Count - 1; i > 0; i--) { int j = r.Next(i + 1); (l[i], l[j]) = (l[j], l[i]); } }
 
     // ---- .sg block model -------------------------------------------------------
     private sealed class Block { public string Class; public int Start; public int End; public string ObjId; }
@@ -216,6 +282,26 @@ internal static class Program
         int p = Find(a, Ascii(tag), from < 0 ? b.Start : from, b.End);
         if (p < 0) return;
         BitConverter.GetBytes(val).CopyTo(a, p + tag.Length);
+    }
+
+    // Re-pin a CMidgardPlan element to a new tile. The plan is a flat list of {POS_X:int, POS_Y:int,
+    // ELEMENT:id} triples (one per occupied tile); the layout is POS_X(5+4) POS_Y(5+4) ELEMENT(7+8+6+1),
+    // so for the element whose id matches, POS_X's int is at ELEMENT-13 and POS_Y's at ELEMENT-4.
+    private static void PatchPlanPos(byte[] a, Block plan, string objId, int newX, int newY)
+    {
+        if (plan == null || objId == null) return;
+        byte[] tag = Ascii("ELEMENT");
+        int p = plan.Start;
+        while ((p = Find(a, tag, p, plan.End)) >= 0)
+        {
+            if (string.Equals(Str(a, p + 15, 6).TrimEnd('\0', ' '), objId, StringComparison.OrdinalIgnoreCase))
+            {
+                BitConverter.GetBytes(newX).CopyTo(a, p - 13);   // POS_X int
+                BitConverter.GetBytes(newY).CopyTo(a, p - 4);    // POS_Y int
+                return;
+            }
+            p += tag.Length;
+        }
     }
 
     private static void PatchBool(byte[] a, Block b, string tag, bool val, int from = -1)
@@ -271,6 +357,62 @@ internal static class Program
         Array.Copy(vb, 0, outp, vp, vb.Length);
         outp[vp + vb.Length] = 0;
         Array.Copy(a, tail, outp, vp + vb.Length + 1, a.Length - tail);
+        return outp;
+    }
+
+    // Append MODIF_ID entries to the CMidUnit with this OBJ_ID (and bump its modifier count). Reallocs, so
+    // call after the in-place pass. The count int sits right after LEVEL: "LEVEL"(5)+lvlInt(4)+countTag(10).
+    private static byte[] AddPerks(byte[] a, string unitObjId, string[] mods)
+    {
+        Block u = IndexBlocks(a).FirstOrDefault(b => b.Class == "CMidUnit"
+            && string.Equals(b.ObjId, unitObjId, StringComparison.OrdinalIgnoreCase));
+        if (u == null) return a;
+        int lv = Find(a, Ascii("LEVEL"), u.Start, u.End);
+        if (lv < 0) return a;
+        int cntVal = lv + 5 + 4 + 10;
+        int cur = BitConverter.ToInt32(a, cntVal);
+        int insAt = cntVal + 4;
+        var ins = new List<byte>();
+        foreach (var m in mods)
+        {
+            ins.AddRange(Ascii("MODIF_ID"));
+            ins.AddRange(BitConverter.GetBytes(m.Length + 1));
+            ins.AddRange(Ascii(m));
+            ins.Add(0);
+        }
+        var outp = new byte[a.Length + ins.Count];
+        Array.Copy(a, 0, outp, 0, insAt);
+        BitConverter.GetBytes(cur + mods.Length).CopyTo(outp, cntVal);
+        ins.CopyTo(outp, insAt);
+        Array.Copy(a, insAt, outp, insAt + ins.Count, a.Length - insAt);
+        return outp;
+    }
+
+    // Cyrillic hero names in Windows-1251 (the game renders the unit's NAME_TXT in cp1251).
+    private static readonly byte[] NameGatherer = { 0xD1, 0xE1, 0xEE, 0xF0, 0xF9, 0xE8, 0xEA };  // "Сборщик"
+    private static readonly byte[] NameCastle   = { 0xF5, 0xEE, 0xE4, 0xE8, 0x20, 0xE4, 0xF0, 0xF3, 0xE3, 0xE8, 0xEC, 0x20, 0xE3, 0xE5, 0xF0, 0xEE, 0xE5, 0xEC };  // "ходи другим героем"
+
+    // Set a unit's NAME_TXT to raw bytes (re-locates the unit by OBJ_ID; reallocs, so call after the in-place pass).
+    private static byte[] SetUnitName(byte[] a, string unitObjId, byte[] name)
+    {
+        Block u = IndexBlocks(a).FirstOrDefault(b => b.Class == "CMidUnit"
+            && string.Equals(b.ObjId, unitObjId, StringComparison.OrdinalIgnoreCase));
+        return u == null ? a : ReplaceLenBytes(a, u.Start, u.End, "NAME_TXT", name);
+    }
+
+    // Replace a length-string value with raw bytes (variable length -> reallocs). Like ReplaceLenStr but byte[].
+    private static byte[] ReplaceLenBytes(byte[] a, int start, int end, string tag, byte[] val)
+    {
+        int p = Find(a, Ascii(tag), start, end);
+        if (p < 0) return a;
+        int lp = p + tag.Length, vp = lp + 4;
+        int tail = vp + (BitConverter.ToInt32(a, lp) - 1) + 1;
+        var outp = new byte[a.Length - tail + vp + val.Length + 1];
+        Array.Copy(a, 0, outp, 0, lp);
+        BitConverter.GetBytes(val.Length + 1).CopyTo(outp, lp);
+        Array.Copy(val, 0, outp, vp, val.Length);
+        outp[vp + val.Length] = 0;
+        Array.Copy(a, tail, outp, vp + val.Length + 1, a.Length - tail);
         return outp;
     }
 

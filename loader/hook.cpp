@@ -1,6 +1,6 @@
 // ============================================================================
 //  berkutx — RSG-generator hijack (mss32.dll + Discipl2.exe, x86).
-//  When the host picks the fake template "Roulette Arena", the mod's random
+//  When the host picks the fake template "luckytest", the mod's random
 //  scenario plays our authored arena instead of an rsg map. See docs/how-it-works.md.
 // ============================================================================
 #include <windows.h>
@@ -14,7 +14,7 @@
 // All RVA_* below are PER-BUILD — set by select_build() from the loaded mss32's PE TimeDateStamp.
 static uint32_t RVA_SAVE;                                               // rsg .sg serializer
 static const unsigned char SIG[5] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };   // push ebp; mov ebp,esp; push -1
-static const char* MARKER = "Roulette Arena";                          // our template name, embedded in the saved scenario desc
+static const char* MARKER = "luckytest";                          // our template name, embedded in the saved scenario desc
 
 // Discipl2 builders (base 0x400000). sub_433B0B = CMidServerBuilderFull(this@ecx, char* Source@[esp+4], …)
 // — the single file-build chokepoint for the played map; we rewrite Source to our rolled arena.
@@ -26,6 +26,10 @@ static const uint32_t RVA_433B0B = 0x00033B0B;
 // Resolved at load by init_paths(): berkutx_rng.exe sits next to this DLL; Exports\ / Templates\ hang off the game exe.
 static wchar_t g_rngExe[MAX_PATH]       = {0};
 static wchar_t g_gameDir[MAX_PATH]      = {0};   // game folder (trailing '\') — passed to the re-roller so it finds Globals\*.dbf
+// User's roulette options, read from the GenerationSettings at menu+44 in hk_3cb0 and handed to berkutx_rng.
+static char g_paramMode[16]   = "random";   // SPIN_PARAMETER_1: 1=random, 2=balance
+static char g_paramChests[16] = "all";       // SPIN_PARAMETER_2: 1=all, 2=potions
+static int  g_paramPerks      = 0;           // SPIN_PARAMETER_3: 1=no, 2=yes
 static wchar_t g_templatesLua[MAX_PATH] = {0};
 static wchar_t g_exportsDir[MAX_PATH]   = {0};
 static char    OUR_PATH_A[MAX_PATH]     = {0};   // current roll's seed file: ADDRESS baked into the sub_433B0B stub, CONTENT set per roll
@@ -241,7 +245,8 @@ static bool run_roulette(unsigned seed, const wchar_t* outPath)
     size_t gn = wcslen(gd);
     if (gn && (gd[gn - 1] == L'\\' || gd[gn - 1] == L'/')) gd[gn - 1] = 0;   // strip trailing '\' (else \" escapes the quote)
     wchar_t cmd[2048];
-    _snwprintf(cmd, 2048, L"\"%s\" %u \"%s\" \"%s\"", g_rngExe, seed, outPath, gd);
+    _snwprintf(cmd, 2048, L"\"%s\" %u \"%s\" \"%s\" mode=%hs chests=%hs perks=%d",
+               g_rngExe, seed, outPath, gd, g_paramMode, g_paramChests, g_paramPerks);
     cmd[2047] = 0;
     STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
     PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
@@ -278,7 +283,7 @@ static void __attribute__((fastcall)) hk_save(void* thisp, void* edx, const void
         // per-roll name keeps the game's companion cache fresh.
         unsigned seed = GetTickCount();
         wchar_t outW[MAX_PATH]; char outA[MAX_PATH];
-        _snwprintf(outW, MAX_PATH, L"%sRoulette Arena %u.sg", g_exportsDir, seed); outW[MAX_PATH - 1] = 0;
+        _snwprintf(outW, MAX_PATH, L"%sluckytest %u.sg", g_exportsDir, seed); outW[MAX_PATH - 1] = 0;
         WideCharToMultiByte(CP_ACP, 0, outW, -1, outA, MAX_PATH, NULL, NULL);
         if (g_prev_arena_w[0]) DeleteFileW(g_prev_arena_w);   // drop the previous roll (best-effort)
         bool ok = run_roulette(seed, outW);
@@ -432,6 +437,19 @@ static int __attribute__((fastcall)) hk_3cb0(int a1, int a2)
     int cnt = (begin && end && end >= begin) ? (int)(end - begin) : -1;
     const char* nm = a1 ? tmpl_name(a1) : 0;
     bool ours = nm && str_eq(nm, MARKER);
+    // Read the chosen customParameter values (one int per spin) from the GenerationSettings at menu+44:
+    // selected-values std::vector at +132 (begin) / +136 (end); each value is the 1-based dropdown choice.
+    if (ours && a1) {
+        int* vb = *(int**)(a1 + 44 + 132);
+        int* ve = *(int**)(a1 + 44 + 136);
+        int pn = (vb && ve && ve >= vb) ? (int)(ve - vb) : 0;
+        int p0 = pn > 0 ? vb[0] : 1, p1 = pn > 1 ? vb[1] : 1, p2 = pn > 2 ? vb[2] : 1;
+        strcpy(g_paramMode,   p0 >= 2 ? "balance" : "random");
+        strcpy(g_paramChests, p1 >= 2 ? "potions" : "all");
+        g_paramPerks = (p2 >= 2) ? 1 : 0;
+        logf("[hk] params(menu+44) n=%d raw=[%d,%d,%d] -> mode=%s chests=%s perks=%d",
+             pn, p0, p1, p2, g_paramMode, g_paramChests, g_paramPerks);
+    }
     char b[256]; int o = 0;
     o += _snprintf(b + o, sizeof(b) - o, "[hk] sub_101D3CB0 menu=%p tmpl='%s' race-vec(+68) count=%d:", (void*)a1, nm ? nm : "(null)", cnt);
     for (int i = 0; i < cnt && i < 12 && o < 200; i++) o += _snprintf(b + o, sizeof(b) - o, " %d", begin[i]);
@@ -581,14 +599,16 @@ static void init_paths(HMODULE self)
     _snwprintf(g_rngExe,       MAX_PATH, L"%sberkutx_rng.exe", hookDir);
     _snwprintf(g_gameDir,      MAX_PATH, L"%s", gameDir);
     _snwprintf(g_exportsDir,   MAX_PATH, L"%sExports\\", gameDir);
-    _snwprintf(g_templatesLua, MAX_PATH, L"%sTemplates\\Roulette Arena.lua", gameDir);
+    _snwprintf(g_templatesLua, MAX_PATH, L"%sTemplates\\luckytest.lua", gameDir);
     _snwprintf(g_logPath,      MAX_PATH, L"%sberkutx_roulette.log", gameDir);
 }
 
-// Write the fake-template stub (embedded in this DLL) into the game's Templates\ so "Roulette Arena"
+// Write the fake-template stub (embedded in this DLL) into the game's Templates\ so "luckytest"
 // appears in the random-scenario list — no separate file is shipped, no manual install step.
 static void ensure_stub_template()
 {
+    wchar_t oldT[MAX_PATH];   // drop the previous-name stub so the picker shows only "luckytest"
+    _snwprintf(oldT, MAX_PATH, L"%sTemplates\\Roulette Arena.lua", g_gameDir); DeleteFileW(oldT);
     HANDLE h = CreateFileW(g_templatesLua, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { logf("[hk] template write FAILED: %ls", g_templatesLua); return; }
     DWORD wr = 0; WriteFile(h, TEMPLATE_LUA, TEMPLATE_LUA_LEN, &wr, NULL);
