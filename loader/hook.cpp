@@ -10,7 +10,8 @@
 #include "template_lua.h"   // TEMPLATE_LUA[] / TEMPLATE_LUA_LEN — the fake-template stub (generated from template.lua)
 
 // mss32 sub_10267FD0 = rsg .sg serializer; the ONLY thing we gate on. __thiscall(this, wchar_t* path).
-static const uint32_t RVA_SAVE = 0x00267FD0;                            // 0x10267FD0 - mss32 base 0x10000000
+// All RVA_* below are PER-BUILD — set by select_build() from the loaded mss32's PE TimeDateStamp.
+static uint32_t RVA_SAVE;                                               // rsg .sg serializer
 static const unsigned char SIG[5] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };   // push ebp; mov ebp,esp; push -1
 static const char* MARKER = "Roulette Arena";                          // our template name, embedded in the saved scenario desc
 
@@ -38,7 +39,7 @@ static wchar_t g_logPath[MAX_PATH] = {0};   // <gameDir>\berkutx_roulette.log (i
 
 // mss32 sub_101D3CB0(menu@ecx, char a2): host commit; copies the lobby race vector (menu+68..72,
 // std::vector<int>) into scenInfo. We overwrite it with our arena's races. __fastcall, prologue 55 8B EC 6A FF.
-static const uint32_t RVA_3CB0 = 0x001D3CB0;   // 0x101D3CB0 - mss32 base
+static uint32_t RVA_3CB0;   // host-commit race-copy (per-build RVA)
 typedef int (__attribute__((fastcall)) *fn_3cb0)(int a1, int a2);
 static fn_3cb0        g_orig_3cb0 = 0;
 static unsigned char* g_tramp_3cb0 = 0;
@@ -48,11 +49,11 @@ static unsigned char* g_tramp_3cb0 = 0;
 // bookkeeping (#1 stop poll-timer (__thiscall)dword_103B0DE0[4*sel](menu+12); #2 if(menu+40) join
 // sub_1005BAC0(menu+36)) then proceed via sub_101D20D0(menu). Our template name is the gen-descriptor
 // std::string at menu+80 (len @+96, cap @+100; MSVC SSO).
-static const uint32_t RVA_21C0  = 0x001D21C0;  // generation-complete cb (prologue 55 8B EC 6A FF)
-static const uint32_t RVA_20D0  = 0x001D20D0;  // proceed-to-lobby, __cdecl(menu)
-static const uint32_t RVA_5BAC0 = 0x0005BAC0;  // std::thread::join, __thiscall
-static const uint32_t RVA_T_103B0DE0 = 0x003B0DE0; // timer-manager dispatch table (stop = [4*sel])
-static const uint32_t RVA_SEL_103B1138 = 0x003B1138; // UI-manager selector
+static uint32_t RVA_21C0;         // generation-complete cb (prologue 55 8B EC 6A FF)
+static uint32_t RVA_20D0;         // proceed-to-lobby, __cdecl(menu)
+static uint32_t RVA_5BAC0;        // std::thread::join, __thiscall
+static uint32_t RVA_T_103B0DE0;   // timer-manager dispatch table (stop = [4*sel])
+static uint32_t RVA_SEL_103B1138; // UI-manager selector
 typedef void (__cdecl *fn_20d0)(int menu);
 static fn_20d0        g_sub_20d0   = 0;         // resolved sub_101D20D0 (proceed-to-lobby)
 static unsigned char* g_tramp_21c0 = 0;         // trampoline -> original sub_101D21C0
@@ -75,6 +76,38 @@ static void logf(const char* fmt, ...)
         WriteFile(h, buf, (DWORD)n, &wr, NULL);
         CloseHandle(h);
     }
+}
+
+// ---- per-build mss32 address profiles --------------------------------------
+// Different D2ModdingToolset builds shift the mss32 RVAs. We key on the mss32 PE
+// TimeDateStamp (unique per build) and load that build's address set. New builds:
+// find the equivalents in the decompile, verify prologues, and add a row here.
+struct Mss32Build {
+    uint32_t tds;                                                  // PE TimeDateStamp = build key
+    uint32_t save, c3cb0, c21c0, c20d0, c5bac0, timer, sel;        // the 7 per-build RVAs
+    const char* name;
+};
+static const Mss32Build g_builds[] = {
+    { 0x67D02351, 0x267FD0, 0x1D3CB0, 0x1D21C0, 0x1D20D0, 0x5BAC0, 0x3B0DE0, 0x3B1138, "standard (last_version)" },
+    { 0x68F94146, 0x273DE0, 0x1D40F0, 0x1D2600, 0x1D2510, 0x5BD40, 0x3BDE40, 0x3BE16C, "slasher_mns_2_4"         },
+};
+
+// Read the loaded mss32's TimeDateStamp and pick the matching profile (fills the RVA_* globals).
+static const Mss32Build* select_build(HMODULE m)
+{
+    const unsigned char* base = (const unsigned char*)m;
+    uint32_t e   = *(const uint32_t*)(base + 0x3C);                // e_lfanew
+    uint32_t tds = *(const uint32_t*)(base + e + 8);              // COFF header + 8
+    for (const Mss32Build& b : g_builds) {
+        if (b.tds == tds) {
+            RVA_SAVE = b.save; RVA_3CB0 = b.c3cb0; RVA_21C0 = b.c21c0; RVA_20D0 = b.c20d0;
+            RVA_5BAC0 = b.c5bac0; RVA_T_103B0DE0 = b.timer; RVA_SEL_103B1138 = b.sel;
+            logf("[hk] mss32 build = %s (TimeDateStamp=0x%08X)", b.name, tds);
+            return &b;
+        }
+    }
+    logf("[hk] UNKNOWN mss32 build (TimeDateStamp=0x%08X) — add a profile; mss32 hooks skipped", tds);
+    return 0;
 }
 
 // ---- hook state ------------------------------------------------------------
@@ -475,20 +508,27 @@ static void ensure_stub_template()
 static DWORD WINAPI worker(LPVOID)
 {
     ensure_stub_template();   // fake template must exist before the game scans Templates\
-    // mss32.dll is already loaded when we inject into the running game; retry a
-    // few times just in case of timing.
+    // mss32.dll is already loaded when we inject into the running game; retry a few
+    // times in case of timing, and once it's mapped pick its per-build address set.
+    const Mss32Build* build = 0; bool resolved = false;
     bool mss = false, l1 = false, l2 = false, l3 = false, skp = false, bld = false;
-    for (int i = 0; i < 50 && !(mss && l1 && l2 && l3 && skp && bld); ++i) {
-        if (!mss)  mss  = install_hook();
-        if (!l1)   l1   = install_log_hook(RVA_4036D0, &g_tramp_36D0, LBL_36D0);
-        if (!l2)   l2   = install_log_hook(RVA_403798, &g_tramp_3798, LBL_3798);
-        if (!l3)   l3   = install_3cb0();
-        if (!skp)  skp  = install_21c0();
-        if (!bld)  bld  = install_433b0b();
-        if (mss && l1 && l2 && l3 && skp && bld) break;
+    for (int i = 0; i < 50; ++i) {
+        HMODULE m = GetModuleHandleA("mss32.dll");
+        if (m && !resolved) { build = select_build(m); resolved = true; }
+        if (build) {                                  // mss32 hooks only on a recognized build
+            if (!mss) mss = install_hook();
+            if (!l3)  l3  = install_3cb0();
+            if (!skp) skp = install_21c0();
+        }
+        if (!l1)  l1  = install_log_hook(RVA_4036D0, &g_tramp_36D0, LBL_36D0);
+        if (!l2)  l2  = install_log_hook(RVA_403798, &g_tramp_3798, LBL_3798);
+        if (!bld) bld = install_433b0b();
+        bool mssDone = resolved && (!build || (mss && l3 && skp));   // unknown build: nothing to wait on
+        if (mssDone && l1 && l2 && bld) break;
         Sleep(100);
     }
-    logf("[hk] worker done: mss32=%d log4036D0=%d log403798=%d log3cb0=%d skip21c0=%d build433B0B=%d", (int)mss, (int)l1, (int)l2, (int)l3, (int)skp, (int)bld);
+    logf("[hk] worker done: build=%s mss32=%d log4036D0=%d log403798=%d log3cb0=%d skip21c0=%d build433B0B=%d",
+         build ? build->name : "unknown", (int)mss, (int)l1, (int)l2, (int)l3, (int)skp, (int)bld);
     return 0;
 }
 
